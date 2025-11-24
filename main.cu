@@ -34,7 +34,7 @@ void initializeParticles(double* h_positions, double* h_velocities, int num_part
 // Structure to hold timing information for each simulation step
 
 
-void updateSimulationCUDA(Particles2D& particles, Grid2D& grid, Boundaries2D& boundaries, int& step, double dt, int steps, SimulationTiming& timing, cross_sections& crossections) {
+void updateSimulationCUDA(Particles2D& particles, Grid2D& grid, Boundaries2D& boundaries, int& step, double dt, int steps, SimulationTiming& timing) {
     auto total_start = std::chrono::high_resolution_clock::now();
 
     int threadsPerBlock = 256;
@@ -128,10 +128,10 @@ void updateSimulationCUDA(Particles2D& particles, Grid2D& grid, Boundaries2D& bo
         step_end = std::chrono::high_resolution_clock::now();
         timing.velocity_update_us += std::chrono::duration_cast<std::chrono::microseconds>(step_end - step_start).count();
 
-        step_start = std::chrono::high_resolution_clock::now();
-        elasticCollisions(particles, 1, dt, crossections);
-        step_end = std::chrono::high_resolution_clock::now();
-        timing.mcc_us += std::chrono::duration_cast<std::chrono::microseconds>(step_end - step_start).count();
+        //step_start = std::chrono::high_resolution_clock::now();
+        //elasticCollisions(particles, 1, dt, crossections);
+        //step_end = std::chrono::high_resolution_clock::now();
+        //timing.mcc_us += std::chrono::duration_cast<std::chrono::microseconds>(step_end - step_start).count();
     }
 
     // Final synchronization timing
@@ -146,7 +146,7 @@ void updateSimulationCUDA(Particles2D& particles, Grid2D& grid, Boundaries2D& bo
 int main() {
     // --- Simulation Parameters ---
     const int MAX_PARTICLES = 1100000;  // Reduced for better performance
-    int num_particles_sim = 100000;     // Start with fewer particles
+    int num_particles_sim = 1000000;     // Start with fewer particles
     const double DELTA_TIME = 0.01;   // Larger time step
     const int UPDATE_STEPS_PER_FRAME = 1;  // Fewer steps per frame for real-time
     int step = 1;
@@ -205,6 +205,7 @@ int main() {
     updateLineBuffer();
     //CudaPoissonSolver solver(grid_m, grid_n, grid_dx, grid_dy, 1e-5, 1);
     //MultigridSolver solver(grid_m, grid_n, mg_levels, grid_dx, 1.25);
+    /*
     cross_sections crossections;
 
     std::pair<std::vector<double>, std::vector<double>> css = read_cross_section("csf/Ar.txt");
@@ -217,6 +218,7 @@ int main() {
         css.second.size() * sizeof(double), cudaMemcpyHostToDevice);
 
     crossections.size = css.first.size();
+    */
 
     std::cout << "Simulation objects allocated." << std::endl;
 
@@ -257,7 +259,7 @@ int main() {
         auto frame_start = std::chrono::high_resolution_clock::now();
 
         // Update simulation with detailed timing
-        updateSimulationCUDA(particles, grid, boundaries, step, DELTA_TIME, UPDATE_STEPS_PER_FRAME, frame_timing, crossections);
+        updateSimulationCUDA(particles, grid, boundaries, step, DELTA_TIME, UPDATE_STEPS_PER_FRAME, frame_timing);
 
         // Time VBO update
         double vbo_time = updateVBO(particles);

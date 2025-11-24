@@ -143,7 +143,7 @@ Particles2D::Particles2D(const int num_particles){
     cudaMemset(d_remove_in_head, 0, num_particles * sizeof(int));
     cudaMemset(d_stay_in_tail, 0, num_particles * sizeof(int));
 
-    double h_q = 1.0f;
+    double h_q = 0.1f;
     double h_m = 1.0f;
     cudaMemcpy(q, &h_q, sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(m, &h_m, sizeof(double), cudaMemcpyHostToDevice);

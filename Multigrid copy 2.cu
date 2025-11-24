@@ -186,270 +186,207 @@ private:
 // Global persistent memory pool (one per process)
 static MultigridMemoryPool g_multigrid_pool;
 
-// ========== OPTIMIZED CUDA KERNELS ==========
+// ========== ORIGINAL CUDA KERNELS (UNCHANGED) ==========
 
-// 2D block layout for better spatial locality and memory coalescing
-__global__ void gauss_seidel_rb_2d(
-    double* __restrict__ phi,
-    const double* __restrict__ rho,
-    const double h2,
-    const double omega,
-    const int nx,
-    const int ny,
-    const int color  // 0=red, 1=black
+__global__
+void gauss_seidel_red_black(
+    double* phi,
+    double* rho,
+    double h2,
+    double omega,
+    int nx,
+    int ny,
+    int is_red
 ) {
-    // 2D indexing with 16x16 blocks
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    const int j = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    // Early exit for boundary and out-of-bounds
-    if (i <= 0 || i >= nx - 1 || j <= 0 || j >= ny - 1) return;
-    
-    // Color filtering
-    if ((i + j) % 2 != color) return;
-    
-    const int idx = j * nx + i;
-    
-    // Load stencil values (explicit loads help compiler optimize)
-    const double phi_center = phi[idx];
-    const double phi_north = phi[idx + nx];
-    const double phi_south = phi[idx - nx];
-    const double phi_east = phi[idx + 1];
-    const double phi_west = phi[idx - 1];
-    const double rho_center = rho[idx];
-    
-    // Compute update
-    const double stencil_sum = phi_north + phi_south + phi_east + phi_west;
-    const double new_val = 0.25 * (stencil_sum - h2 * rho_center);
-    
-    // SOR update with fused multiply-add
-    phi[idx] = fma(omega, new_val, (1.0 - omega) * phi_center);
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int size = nx * ny;
+    if (idx >= size) return;
+    int i = idx % nx;
+    int j = idx / nx;
+
+    if (i > 0 && i < nx - 1 && j > 0 && j < ny - 1) {
+        if ((i + j) % 2 == is_red) {
+            int idx_n = (j + 1) * nx + i;
+            int idx_s = (j - 1) * nx + i;
+            int idx_e = j * nx + (i + 1);
+            int idx_w = j * nx + (i - 1);
+
+            double update = 0.25 * (
+                phi[idx_n] + phi[idx_s] +
+                phi[idx_e] + phi[idx_w] -
+                h2 * rho[idx]
+            );
+            phi[idx] = (1.0 - omega) * phi[idx] + omega * update;
+        }
+    }
 }
 
-__global__ void gauss_seidel_rb_2d_coop(
-    double* __restrict__ phi,
-    const double* __restrict__ rho,
-    const double h2,
-    const double omega,
-    const int nx,
-    const int ny,
-    const int num_iterations
+__global__ void gauss_seidel_red_black_sync(
+    double* phi,
+    double* rho,
+    double h2,
+    double omega,
+    int nx,
+    int ny,
+    int num_iterations
 ) {
     grid_group grid = this_grid();
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int size = nx * ny;
     
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    const int j = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    const bool is_interior = (i > 0 && i < nx - 1 && j > 0 && j < ny - 1);
-    const int idx = j * nx + i;
+    int i = idx % nx;
+    int j = idx / nx;
     
     for (int iter = 0; iter < num_iterations; iter++) {
-        // Red sweep
-        if (is_interior && ((i + j) % 2 == 1)) {
-            const double phi_c = phi[idx];
-            const double stencil = phi[idx + nx] + phi[idx - nx] + 
-                                  phi[idx + 1] + phi[idx - 1];
-            const double new_val = 0.25 * (stencil - h2 * rho[idx]);
-            phi[idx] = fma(omega, new_val, (1.0 - omega) * phi_c);
+        // Red points
+        if (idx < size && i > 0 && i < nx - 1 && j > 0 && j < ny - 1) {
+            if ((i + j) % 2 == 1) {
+                int idx_n = (j + 1) * nx + i;
+                int idx_s = (j - 1) * nx + i;
+                int idx_e = j * nx + (i + 1);
+                int idx_w = j * nx + (i - 1);
+                double update = 0.25 * (
+                    phi[idx_n] + phi[idx_s] +
+                    phi[idx_e] + phi[idx_w] -
+                    h2 * rho[idx]
+                );
+                phi[idx] = (1.0 - omega) * phi[idx] + omega * update;
+            }
         }
+
         grid.sync();
         
-        // Black sweep
-        if (is_interior && ((i + j) % 2 == 0)) {
-            const double phi_c = phi[idx];
-            const double stencil = phi[idx + nx] + phi[idx - nx] + 
-                                  phi[idx + 1] + phi[idx - 1];
-            const double new_val = 0.25 * (stencil - h2 * rho[idx]);
-            phi[idx] = fma(omega, new_val, (1.0 - omega) * phi_c);
+        // Black points
+        if (idx < size && i > 0 && i < nx - 1 && j > 0 && j < ny - 1) {
+            if ((i + j) % 2 == 0) {
+                int idx_n = (j + 1) * nx + i;
+                int idx_s = (j - 1) * nx + i;
+                int idx_e = j * nx + (i + 1);
+                int idx_w = j * nx + (i - 1);
+                double update = 0.25 * (
+                    phi[idx_n] + phi[idx_s] +
+                    phi[idx_e] + phi[idx_w] -
+                    h2 * rho[idx]
+                );
+                phi[idx] = (1.0 - omega) * phi[idx] + omega * update;
+            }
         }
+        
         grid.sync();
     }
 }
 
-__global__ void residual_2d(
-    const double* __restrict__ phi,
-    const double* __restrict__ rho,
-    double* __restrict__ res,
-    const double inv_h2,
-    const int nx,
-    const int ny
+__global__
+void residual_kernel(
+    double* phi,
+    double* rho,
+    double* res,
+    double inv_h2,
+    int nx,
+    int ny
 ) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    const int j = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    if (i >= nx || j >= ny) return;
-    
-    const int idx = j * nx + i;
-    
-    // Boundary points have zero residual
-    if (i == 0 || i == nx - 1 || j == 0 || j == ny - 1) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= nx * ny) return;
+
+    int i = idx % nx;
+    int j = idx / nx;
+
+    if (i > 0 && i < nx - 1 && j > 0 && j < ny - 1) {
+        int index = j * nx + i;
+        double laplacian = (
+            phi[index - nx] + phi[index + nx] +
+            phi[index - 1] + phi[index + 1] -
+            4.0 * phi[index]
+        ) * inv_h2;
+        res[index] = rho[index] - laplacian;
+    } else {
         res[idx] = 0.0;
-        return;
     }
-    
-    // Interior points: compute Laplacian
-    const double phi_c = phi[idx];
-    const double laplacian = (phi[idx - nx] + phi[idx + nx] + 
-                             phi[idx - 1] + phi[idx + 1] - 
-                             4.0 * phi_c) * inv_h2;
-    
-    res[idx] = rho[idx] - laplacian;
 }
 
-__global__ void restrict_2d(
-    const double* __restrict__ fine,
-    double* __restrict__ coarse,
-    const int nx_fine,
-    const int ny_fine,
-    const int nx_coarse,
-    const int ny_coarse
-) {
-    const int ic = blockIdx.x * blockDim.x + threadIdx.x;
-    const int jc = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    if (ic >= nx_coarse || jc >= ny_coarse) return;
-    
-    // Map to fine grid
-    const int if_val = ic * 2;
-    const int jf = jc * 2;
-    
-    // Bounds check
-    if (if_val >= nx_fine || jf >= ny_fine) {
-        coarse[jc * nx_coarse + ic] = 0.0;
-        return;
-    }
-    
-    const int idx_f = jf * nx_fine + if_val;
-    
-    // Full weighting restriction (9-point stencil)
-    // Weights: center=4/16, faces=2/16, corners=1/16
-    double sum = 4.0 * fine[idx_f];  // Center
-    
-    // Faces (with bounds checking)
-    if (if_val > 0) 
-        sum += 2.0 * fine[idx_f - 1];
-    if (if_val < nx_fine - 1) 
-        sum += 2.0 * fine[idx_f + 1];
-    if (jf > 0) 
-        sum += 2.0 * fine[idx_f - nx_fine];
-    if (jf < ny_fine - 1) 
-        sum += 2.0 * fine[idx_f + nx_fine];
-    
-    // Corners (with bounds checking)
-    if (if_val > 0 && jf > 0) 
-        sum += fine[idx_f - nx_fine - 1];
-    if (if_val < nx_fine - 1 && jf > 0) 
-        sum += fine[idx_f - nx_fine + 1];
-    if (if_val > 0 && jf < ny_fine - 1) 
-        sum += fine[idx_f + nx_fine - 1];
-    if (if_val < nx_fine - 1 && jf < ny_fine - 1) 
-        sum += fine[idx_f + nx_fine + 1];
-    
-    coarse[jc * nx_coarse + ic] = sum * 0.0625;  // Multiply by 1/16
-}
+__global__
+void restrict_kernel(const double* fine, double* coarse, int nx_fine, int ny_fine, int nx_coarse, int ny_coarse) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= ny_coarse || j >= nx_coarse) return;
 
-__global__ void prolong_2d(
-    double* __restrict__ fine,
-    const double* __restrict__ coarse,
-    const int nx_coarse,
-    const int ny_coarse,
-    const int nx_fine,
-    const int ny_fine
-) {
-    const int if_val = blockIdx.x * blockDim.x + threadIdx.x;
-    const int jf = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    if (if_val >= nx_fine || jf >= ny_fine) return;
-    
-    // Map to coarse grid
-    const int ic = if_val / 2;
-    const int jc = jf / 2;
-    
-    if (ic >= nx_coarse || jc >= ny_coarse) return;
-    
-    const int idx_f = jf * nx_fine + if_val;
-    const int idx_c = jc * nx_coarse + ic;
-    
-    const bool i_odd = (if_val & 1);  // Bit operation faster than modulo
-    const bool j_odd = (jf & 1);
-    
-    double val;
-    
-    if (!i_odd && !j_odd) {
-        // Direct injection
-        val = coarse[idx_c];
-    } 
-    else if (i_odd && !j_odd) {
-        // Horizontal interpolation
-        val = (ic + 1 < nx_coarse) ? 
-              0.5 * (coarse[idx_c] + coarse[idx_c + 1]) : 
-              coarse[idx_c];
-    } 
-    else if (!i_odd && j_odd) {
-        // Vertical interpolation
-        val = (jc + 1 < ny_coarse) ? 
-              0.5 * (coarse[idx_c] + coarse[idx_c + nx_coarse]) : 
-              coarse[idx_c];
-    } 
-    else {
-        // Bilinear interpolation
-        if (ic + 1 < nx_coarse && jc + 1 < ny_coarse) {
-            val = 0.25 * (coarse[idx_c] + 
-                         coarse[idx_c + 1] +
-                         coarse[idx_c + nx_coarse] +
-                         coarse[idx_c + nx_coarse + 1]);
-        } else {
-            val = coarse[idx_c];
+    int i_f = 2 * i;
+    int j_f = 2 * j;
+
+    double result = 0.0;
+    double weights[3][3] = {{0.0625, 0.125, 0.0625},
+                             {0.125,  0.25,  0.125},
+                             {0.0625, 0.125, 0.0625}};
+
+    for (int di = -1; di <= 1; ++di) {
+        for (int dj = -1; dj <= 1; ++dj) {
+            int ii = i_f + di;
+            int jj = j_f + dj;
+            if (ii >= 0 && ii < ny_fine && jj >= 0 && jj < nx_fine) {
+                result += fine[ii * nx_fine + jj] * weights[di + 1][dj + 1];
+            }
         }
     }
-    
-    fine[idx_f] += val;
+
+    coarse[i * nx_coarse + j] = result;
 }
 
-__global__ void norm_squared_warp_shuffle(
-    const double* __restrict__ vec,
-    double* __restrict__ result,
-    const int size
+__global__
+void prolong_kernel(double* fine, const double* coarse, int nx_coarse, int ny_coarse, int nx_fine) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = idx / nx_fine;
+    int j = idx % nx_fine;
+    if (i >= 2 * ny_coarse - 1 || j >= 2 * nx_coarse - 1) return;
+
+    int i_c = i / 2;
+    int j_c = j / 2;
+    int c_idx = i_c * nx_coarse + j_c;
+
+    double val = 0.0;
+
+    bool is_i_odd = i % 2;
+    bool is_j_odd = j % 2;
+
+    if (!is_i_odd && !is_j_odd) {
+        val = coarse[c_idx];
+    } else if (is_i_odd && !is_j_odd && i_c + 1 < ny_coarse) {
+        val = 0.5 * (coarse[c_idx] + coarse[(i_c + 1) * nx_coarse + j_c]);
+    } else if (!is_i_odd && is_j_odd && j_c + 1 < nx_coarse) {
+        val = 0.5 * (coarse[c_idx] + coarse[i_c * nx_coarse + (j_c + 1)]);
+    } else if (is_i_odd && is_j_odd && i_c + 1 < ny_coarse && j_c + 1 < nx_coarse) {
+        val = 0.25 * (
+            coarse[c_idx] +
+            coarse[(i_c + 1) * nx_coarse + j_c] +
+            coarse[i_c * nx_coarse + (j_c + 1)] +
+            coarse[(i_c + 1) * nx_coarse + (j_c + 1)]
+        );
+    }
+
+    fine[i * nx_fine + j] += val;
+}
+
+__global__ void norm_kernel(
+    double* vec,
+    double* result,
+    int size
 ) {
-    extern __shared__ double sdata[];
-    
-    const int tid = threadIdx.x;
-    const int idx = blockIdx.x * blockDim.x + tid;
-    
-    // Each thread computes partial sum
-    double sum = 0.0;
-    if (idx < size) {
-        const double val = vec[idx];
-        sum = val * val;
-    }
-    
-    // Warp-level reduction using shuffle operations
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
-    }
-    
-    // First thread in each warp writes to shared memory
-    const int lane = tid & 31;
-    const int warp_id = tid >> 5;
-    
-    if (lane == 0) {
-        sdata[warp_id] = sum;
-    }
+    extern __shared__ double shared_data[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+
+    shared_data[tid] = (idx < size) ? vec[idx] * vec[idx] : 0.0;
     __syncthreads();
-    
-    // Final reduction in first warp
-    if (warp_id == 0) {
-        sum = (tid < (blockDim.x >> 5)) ? sdata[lane] : 0.0;
-        
-        #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            sum += __shfl_down_sync(0xffffffff, sum, offset);
+
+    for (int s = blockDim.x / 2; s > 0; s /= 2) {
+        if (tid < s) {
+            shared_data[tid] += shared_data[tid + s];
         }
-        
-        if (tid == 0) {
-            atomicAdd(result, sum);
-        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        atomicAdd(result, shared_data[0]);
     }
 }
 
@@ -471,45 +408,37 @@ __global__ void check_convergence_kernel(
     }
 }
 
-// ========== HOST FUNCTIONS WITH OPTIMIZATIONS ==========
+// ========== HOST FUNCTIONS (UNCHANGED) ==========
 
 void smooth(double* phi, double* rho, int nx, int ny, double h, double omega, int iterations) {
-    double h2 = h * h;
-    
-    // Use 2D blocks for better cache locality
-    dim3 block(16, 16);
-    dim3 grid((nx + 15) / 16, (ny + 15) / 16);
-    
     int device;
     cudaDeviceProp prop;
     cudaGetDevice(&device);
     cudaGetDeviceProperties(&prop, device);
 
-    if (prop.cooperativeLaunch && iterations > 1) {
-        void* kernel_args[] = {&phi, &rho, &h2, &omega, &nx, &ny, &iterations};
-        cudaError_t err = cudaLaunchCooperativeKernel(
-            (void*)gauss_seidel_rb_2d_coop,
-            grid,
-            block,
-            kernel_args
-        );
-        if (err != cudaSuccess) {
-            cerr << "Cooperative kernel launch failed: "
-                 << cudaGetErrorString(err) << endl;
-        }
-    } else {
-        for (int i = 0; i < iterations; i++) {
-            gauss_seidel_rb_2d<<<grid, block>>>(phi, rho, h2, omega, nx, ny, 1);
-            gauss_seidel_rb_2d<<<grid, block>>>(phi, rho, h2, omega, nx, ny, 0);
-        }
+    int block = 256;
+    int grid = (nx * ny + block - 1) / block;
+    double h2 = h * h;
+    void* kernel_args[] = {&phi, &rho, &h2, &omega, &nx, &ny, &iterations};
+
+    cudaError_t err = cudaLaunchCooperativeKernel(
+        (void*)gauss_seidel_red_black_sync,
+        grid,
+        block,
+        kernel_args
+    );
+
+    if (err != cudaSuccess) {
+        cerr << "Cooperative kernel launch failed: "
+             << cudaGetErrorString(err) << endl;
     }
 }
 
 void residual(double* res, double* phi, double* rho, int nx, int ny, double h) {
-    dim3 block(16, 16);
-    dim3 grid((nx + 15) / 16, (ny + 15) / 16);
+    int block = 256;
+    int grid = (nx * ny + block - 1) / block;
     double inv_h2 = 1.0 / (h * h);
-    residual_2d<<<grid, block>>>(phi, rho, res, inv_h2, nx, ny);
+    residual_kernel<<<grid, block>>>(phi, rho, res, inv_h2, nx, ny);
 }
 
 void restrict_level(double* coarse, double* fine, int nx_fine, int ny_fine) {
@@ -517,23 +446,22 @@ void restrict_level(double* coarse, double* fine, int nx_fine, int ny_fine) {
     int ny_coarse = (ny_fine + 1) / 2;
     dim3 block(16, 16);
     dim3 grid((nx_coarse + 15) / 16, (ny_coarse + 15) / 16);
-    restrict_2d<<<grid, block>>>(fine, coarse, nx_fine, ny_fine, nx_coarse, ny_coarse);
+    restrict_kernel<<<grid, block>>>(fine, coarse, nx_fine, ny_fine, nx_coarse, ny_coarse);
 }
 
 void prolong_level(double* fine, double* coarse, int nx_coarse, int ny_coarse) {
     int nx_fine = 2 * (nx_coarse - 1) + 1;
     int ny_fine = 2 * (ny_coarse - 1) + 1;
-    dim3 block(16, 16);
-    dim3 grid((nx_fine + 15) / 16, (ny_fine + 15) / 16);
-    prolong_2d<<<grid, block>>>(fine, coarse, nx_coarse, ny_coarse, nx_fine, ny_fine);
+    int block = 256;
+    int grid = (nx_fine * ny_fine + block - 1) / block;
+    prolong_kernel<<<grid, block>>>(fine, coarse, nx_coarse, ny_coarse, nx_fine);
 }
 
 void l2_norm_device(double* vec_d, double* result_d, int size) {
     cudaMemset(result_d, 0, sizeof(double));
     int block = 256;
     int grid = (size + block - 1) / block;
-    size_t shared_mem = (block / 32) * sizeof(double);  // One double per warp
-    norm_squared_warp_shuffle<<<grid, block, shared_mem>>>(vec_d, result_d, size);
+    norm_kernel<<<grid, block, block * sizeof(double)>>>(vec_d, result_d, size);
 }
 
 void v_cycle(
